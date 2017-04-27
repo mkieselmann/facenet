@@ -72,10 +72,14 @@ def main(args):
     print('Model directory: %s' % model_dir)
     print('Log directory: %s' % log_dir)
     pretrained_model = None
+    retrain_model = False
     if args.pretrained_model:
         pretrained_model = os.path.expanduser(args.pretrained_model)
         print('Pre-trained model: %s' % pretrained_model)
-    
+    if args.pretrained_model_retraining:
+        retrain_model = True
+        print('Re-trains model')
+
     if args.lfw_dir:
         print('LFW directory: %s' % args.lfw_dir)
         # Read the file containing the pairs used for testing
@@ -90,6 +94,9 @@ def main(args):
         # Get a list of image paths and their labels
         image_list, label_list = facenet.get_image_paths_and_labels(train_set)
         assert len(image_list)>0, 'The dataset should not be empty'
+        
+        print(image_list)
+        print(label_list)
         
         # Create a queue that produces indices into the image_list and label_list 
         labels = ops.convert_to_tensor(label_list, dtype=tf.int32)
@@ -178,7 +185,8 @@ def main(args):
                 scope='Logits', reuse=False)
 
         embeddings = tf.nn.l2_normalize(bottleneck, 1, 1e-10, name='embeddings')
-
+        softmax = tf.nn.softmax(logits, name='softmax')
+        
         # Add center loss
         if args.center_loss_factor>0.0:
             prelogits_center_loss, _ = facenet.center_loss(prelogits, label_batch, args.center_loss_alfa, nrof_classes)
@@ -204,6 +212,13 @@ def main(args):
         
         # Create a saver
         saver = tf.train.Saver(tf.trainable_variables(), max_to_keep=3)
+        # Create a new saver for restoring everything but the last layer
+        retrainSaver = None
+        if retrain_model:
+            restorable_variables = tf.trainable_variables()
+            non_restorable_variables = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='Logits')
+            restorable_variables = [variable for variable in restorable_variables if variable not in non_restorable_variables]
+            retrainSaver = tf.train.Saver(restorable_variables, max_to_keep=3)
 
         # Build the summary operation based on the TF collection of Summaries.
         summary_op = tf.summary.merge_all()
@@ -220,8 +235,12 @@ def main(args):
         with sess.as_default():
 
             if pretrained_model:
-                print('Restoring pretrained model: %s' % pretrained_model)
-                saver.restore(sess, pretrained_model)
+                if retrain_model:
+                    print('Restoring parts of pretrained model for retraining: %s' % pretrained_model)
+                    retrainSaver.restore(sess, pretrained_model)
+                else:
+                    print('Restoring pretrained model: %s' % pretrained_model)
+                    saver.restore(sess, pretrained_model)
 
             # Training and validation loop
             print('Running training')
@@ -389,6 +408,8 @@ def parse_arguments(argv):
         help='Upper bound on the amount of GPU memory that will be used by the process.', default=1.0)
     parser.add_argument('--pretrained_model', type=str,
         help='Load a pretrained model before training starts.')
+    parser.add_argument('--pretrained_model_retraining',
+        help='Load a pretrained model before training starts but resets the weights of the last layer.', action='store_true')
     parser.add_argument('--data_dir', type=str,
         help='Path to the data directory containing aligned face patches. Multiple directories are separated with colon.',
         default='~/datasets/facescrub/fs_aligned:~/datasets/casia/casia-webface-aligned')
