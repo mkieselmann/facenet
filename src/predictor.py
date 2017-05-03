@@ -68,7 +68,7 @@ class FaceNetPredictor:
 
         return train_image_list, train_label_list, train_set
 
-    def knn(self, embeddings, samples_embedding_list, samples_labels_oneHot, session, k=4):
+    def knn(self, embeddings, samples_embedding_list, samples_labels_oneHot, session, k):
         embeddings_placeholder = tf.placeholder(tf.float32, shape=[None, 128])
         train_embeddings_placeholder = tf.placeholder(tf.float32, shape=[None, 128])
         train_labels_placeholder = tf.placeholder(tf.int32, shape=[None,samples_labels_oneHot.shape[1]])
@@ -133,8 +133,7 @@ def main(args):
             feed_dict = {num_labels_placeholder: num_labels, train_labels_placeholder: train_labels_list}
             train_labels_list_one_hot = sess.run(one_hot_op, feed_dict=feed_dict)
 
-            k = 2
-            predictions = fp.knn(embeddings, train_embeddings, train_labels_list_one_hot, sess, k)
+            predictions = fp.knn(embeddings, train_embeddings, train_labels_list_one_hot, sess, args.k)
             print("Predictions")
             print(predictions)
 
@@ -159,6 +158,8 @@ def parse_arguments(argv):
         help='Image size (height, width) in pixels.', default=160)
     parser.add_argument('--samples_dir', type=str, required=True,
         help='Path to the directory containing folders for each class with training images.')
+    parser.add_argument('--k', type=int, required=False,
+        help='The parameter k for determining the k-nearest neighbors. Rule-of-thumb: should not be larger than the number of samples in each class.', default=2)
 
     return parser.parse_args(argv)
   
