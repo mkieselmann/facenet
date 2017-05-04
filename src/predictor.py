@@ -70,18 +70,15 @@ class FaceNetPredictor:
 
         return train_image_list, train_label_list, train_set
 
-    def knn(self, embeddings, samples_embedding_list, samples_labels, session, k):
+    def setup_knn_prediction_op(self, samples_labels, session, k):
         num_labels = np.max(samples_labels)+1
 
-        embeddings_placeholder = tf.placeholder(tf.float32, shape=[None, 128])
-        train_embeddings_placeholder = tf.placeholder(tf.float32, shape=[None, 128])
-        num_labels_placeholder = tf.placeholder(tf.int32)
-        train_labels_placeholder = tf.placeholder(tf.int32, shape=[len(samples_labels)])
+        embeddings_placeholder = tf.placeholder(tf.float32, shape=[None, 128], name='knn_embeddings')
+        train_embeddings_placeholder = tf.placeholder(tf.float32, shape=[None, 128], name='knn_train_embeddings')
+        num_labels_placeholder = tf.placeholder(tf.int32, name='knn_num_labels')
+        train_labels_placeholder = tf.placeholder(tf.int32, shape=[len(samples_labels)], name='knn_train_labels')
 
         train_labels_one_hot = tf.one_hot(train_labels_placeholder, num_labels_placeholder)
-
-        # L1
-        #distance = tf.reduce_sum(tf.abs(tf.subtract(train_embeddings_placeholder, tf.expand_dims(embeddings_placeholder,1))), axis=2)
 
         # L2
         distance = tf.sqrt(tf.reduce_sum(tf.square(tf.subtract(train_embeddings_placeholder, tf.expand_dims(embeddings_placeholder,1))), axis=2))
@@ -92,15 +89,16 @@ class FaceNetPredictor:
 
         # Predict the mode category
         count_of_predictions = tf.reduce_sum(prediction_indices, axis=1)
-        prediction_op = tf.argmax(count_of_predictions, axis=1, name='predictions')
+        prediction_op = tf.argmax(count_of_predictions, axis=1, name='knn_predictions')
 
-        #init_op = tf.initialize_variables([embeddings_placeholder, train_embeddings_placeholder, num_labels_placeholder, train_labels_placeholder])
-        #session.run(init_op)
+        return prediction_op
 
-        feed_dict = {embeddings_placeholder:embeddings, train_embeddings_placeholder: samples_embedding_list, train_labels_placeholder: samples_labels, num_labels_placeholder: num_labels}
-        predictions = session.run(prediction_op, feed_dict=feed_dict)
+    def load_frozen_model(self, model_path):
+        with tf.gfile.GFile(model_path, "rb") as f:
+            graph_def = tf.GraphDef()
+            graph_def.ParseFromString(f.read())
 
-        return predictions
+        tf.import_graph_def(graph_def, input_map=None, return_elements=None, name="prefix", op_dict=None, producer_op_list=None)
 
     def load_facenet_model(self, model_dir, meta_file, ckpt_file):
         model_dir_exp = os.path.expanduser(model_dir)
@@ -129,28 +127,45 @@ def main(args):
             log_dir = fp.createLogsDirIfNecessary(args.logs_base_dir)
             fp.storeRevisionInfoIfNecessary(log_dir)
 
-            print('Model directory: %s' % model_dir)
-            meta_file, ckpt_file = facenet.get_model_filenames(os.path.expanduser(model_dir))
-                
-            print('Metagraph file: %s' % meta_file)
-            print('Checkpoint file: %s' % ckpt_file)
-            fp.load_facenet_model(model_dir, meta_file, ckpt_file)
+            # load images
+            train_images_list, train_labels_list, data_set = fp.load_training_data_and_labels(args.samples_dir, args.image_size)
+            inception_images = fp.load_and_align_inception_data(args.data_dir, args.image_size)
+            num_labels = np.max(train_labels_list)+1
 
+            if args.frozen_model_path != None:
+                print("Loading frozen model: %s" % args.frozen_model_path)
+                fp.load_frozen_model(args.frozen_model_path)
+            else:
+                print('Model directory: %s' % model_dir)
+                meta_file, ckpt_file = facenet.get_model_filenames(os.path.expanduser(model_dir))
+                
+                print('Metagraph file: %s' % meta_file)
+                print('Checkpoint file: %s' % ckpt_file)
+                fp.load_facenet_model(model_dir, meta_file, ckpt_file)
+                fp.setup_knn_prediction_op(train_labels_list, sess, args.k)
+
+            print("Successfully loaded model")
             images_placeholder = tf.get_default_graph().get_tensor_by_name("input:0")
             embeddings_placeholder = tf.get_default_graph().get_tensor_by_name("embeddings:0")
             phase_train_placeholder = tf.get_default_graph().get_tensor_by_name("phase_train:0")
 
+            knn_embeddings_placeholder = tf.get_default_graph().get_tensor_by_name("knn_embeddings:0")
+            knn_train_embeddings_placeholder = tf.get_default_graph().get_tensor_by_name("knn_train_embeddings:0")
+            knn_num_labels_placeholder = tf.get_default_graph().get_tensor_by_name("knn_num_labels:0")
+            knn_train_labels_placeholder = tf.get_default_graph().get_tensor_by_name("knn_train_labels:0")
+            knn_predictions = tf.get_default_graph().get_tensor_by_name("knn_predictions:0")
+
             # calculate embedding for training images
-            train_images_list, train_labels_list, data_set = fp.load_training_data_and_labels(args.samples_dir, args.image_size)
             feed_dict = {images_placeholder: train_images_list, phase_train_placeholder: False}
             train_embeddings = sess.run(embeddings_placeholder, feed_dict=feed_dict)
 
             # calculate embedding for inception images
-            inception_images = fp.load_and_align_inception_data(args.data_dir, args.image_size)
             feed_dict = {images_placeholder: inception_images, phase_train_placeholder: False}
             embeddings = sess.run(embeddings_placeholder, feed_dict=feed_dict)
 
-            predicted_classes = fp.knn(embeddings, train_embeddings, train_labels_list, sess, args.k)
+            feed_dict = {knn_embeddings_placeholder:embeddings, knn_train_embeddings_placeholder: train_embeddings, knn_train_labels_placeholder: train_labels_list, knn_num_labels_placeholder: num_labels}
+            predicted_classes = sess.run(knn_predictions, feed_dict=feed_dict)
+
             predicted_class_labels = map(lambda imageClass: imageClass.name, np.take(data_set, predicted_classes))
             print("Predictions")
             print(predicted_classes)
@@ -166,7 +181,9 @@ def parse_arguments(argv):
     parser.add_argument('--logs_base_dir', type=str, required=False,
         help='Directory where to write event logs.', default='~/logs/facenet')
     parser.add_argument('--model_dir', type=str, required=True,
-        help='Directory where to load the model from.')
+        help='Directory where to load the facenet model from.')
+    parser.add_argument('--frozen_model_path', type=str, required=False,
+        help='Directory where to load the complete frozen model from.', default=None)
     parser.add_argument('--model_store_dir', type=str, required=False,
         help='Directory where to store the model subdirectory.', default=None)
     parser.add_argument('--data_dir', type=str, required=True,
