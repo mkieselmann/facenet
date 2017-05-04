@@ -93,13 +93,6 @@ class FaceNetPredictor:
 
         return prediction_op
 
-    def load_frozen_model(self, model_path):
-        with tf.gfile.GFile(model_path, "rb") as f:
-            graph_def = tf.GraphDef()
-            graph_def.ParseFromString(f.read())
-
-        tf.import_graph_def(graph_def, input_map=None, return_elements=None, name="prefix", op_dict=None, producer_op_list=None)
-
     def load_facenet_model(self, model_dir, meta_file, ckpt_file):
         model_dir_exp = os.path.expanduser(model_dir)
         saver = tf.train.import_meta_graph(os.path.join(model_dir_exp, meta_file))
@@ -107,13 +100,25 @@ class FaceNetPredictor:
         tf.get_default_session().run(tf.local_variables_initializer())
         saver.restore(tf.get_default_session(), os.path.join(model_dir_exp, ckpt_file))
 
+    def load_frozen_model(self, model_path):
+        with tf.gfile.GFile(model_path, "rb") as f:
+            graph_def = tf.GraphDef()
+            graph_def.ParseFromString(f.read())
+        with tf.Graph().as_default() as graph:
+            tf.import_graph_def(graph_def, name="")
+
+        return graph
+
     def store_model(self, session, model_store_dir):
         model_dir = os.path.expanduser(model_store_dir)
+        datetime_str = datetime.strftime(datetime.now(), '%Y%m%d-%H%M%S')
+        checkpoint_path = os.path.join(model_dir, 'model-%s.ckpt' % datetime_str)
+        metagraph_filename = os.path.join(model_dir, 'model-%s.meta' % datetime_str)
         if not os.path.isdir(model_dir):  # Create the model directory if it doesn't exist
             os.makedirs(model_dir)
         saver = tf.train.Saver()
-        saver.save(session, model_dir + "/knn_classifier_model.ckpt")
-        tf.train.write_graph(session.graph_def, '', model_dir + '/knn_classifier_model_graph.pb')
+        saver.save(session, checkpoint_path, write_meta_graph=False,global_step=1)
+        saver.export_meta_graph(metagraph_filename)
 
 def main(args):
     # get file list    
@@ -134,7 +139,9 @@ def main(args):
 
             if args.frozen_model_path != None:
                 print("Loading frozen model: %s" % args.frozen_model_path)
-                fp.load_frozen_model(args.frozen_model_path)
+                graph = fp.load_frozen_model(args.frozen_model_path)
+                sess = tf.Session(graph=graph)
+                sess.as_default()
             else:
                 print('Model directory: %s' % model_dir)
                 meta_file, ckpt_file = facenet.get_model_filenames(os.path.expanduser(model_dir))
@@ -145,26 +152,17 @@ def main(args):
                 fp.setup_knn_prediction_op(train_labels_list, sess, args.k)
 
             print("Successfully loaded model")
-            images_placeholder = tf.get_default_graph().get_tensor_by_name("input:0")
-            embeddings_placeholder = tf.get_default_graph().get_tensor_by_name("embeddings:0")
-            phase_train_placeholder = tf.get_default_graph().get_tensor_by_name("phase_train:0")
-
-            knn_embeddings_placeholder = tf.get_default_graph().get_tensor_by_name("knn_embeddings:0")
-            knn_train_embeddings_placeholder = tf.get_default_graph().get_tensor_by_name("knn_train_embeddings:0")
-            knn_num_labels_placeholder = tf.get_default_graph().get_tensor_by_name("knn_num_labels:0")
-            knn_train_labels_placeholder = tf.get_default_graph().get_tensor_by_name("knn_train_labels:0")
-            knn_predictions = tf.get_default_graph().get_tensor_by_name("knn_predictions:0")
 
             # calculate embedding for training images
-            feed_dict = {images_placeholder: train_images_list, phase_train_placeholder: False}
-            train_embeddings = sess.run(embeddings_placeholder, feed_dict=feed_dict)
+            feed_dict = {"input:0": train_images_list, "phase_train:0": False}
+            train_embeddings = sess.run("embeddings:0", feed_dict=feed_dict)
 
             # calculate embedding for inception images
-            feed_dict = {images_placeholder: inception_images, phase_train_placeholder: False}
-            embeddings = sess.run(embeddings_placeholder, feed_dict=feed_dict)
+            feed_dict = {"input:0": inception_images, "phase_train:0": False}
+            embeddings = sess.run("embeddings:0", feed_dict=feed_dict)
 
-            feed_dict = {knn_embeddings_placeholder:embeddings, knn_train_embeddings_placeholder: train_embeddings, knn_train_labels_placeholder: train_labels_list, knn_num_labels_placeholder: num_labels}
-            predicted_classes = sess.run(knn_predictions, feed_dict=feed_dict)
+            feed_dict = {"knn_embeddings:0":embeddings, "knn_train_embeddings:0": train_embeddings, "knn_train_labels:0": train_labels_list, "knn_num_labels:0": num_labels}
+            predicted_classes = sess.run("knn_predictions:0", feed_dict=feed_dict)
 
             predicted_class_labels = map(lambda imageClass: imageClass.name, np.take(data_set, predicted_classes))
             print("Predictions")
