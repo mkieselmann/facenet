@@ -13,40 +13,6 @@ import align.detect_face
 from scipy import misc
 import numpy as np
 
-def load_and_align_data(image_paths, image_size, margin = 0, gpu_memory_fraction=1.0):
-    minsize = 20 # minimum size of face
-    threshold = [ 0.6, 0.7, 0.7 ]  # three steps's threshold
-    factor = 0.709 # scale factor
-    
-    print('Creating networks and loading parameters')
-    with tf.Graph().as_default():
-        gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=gpu_memory_fraction)
-        sess = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options, log_device_placement=False))
-        with sess.as_default():
-            pnet, rnet, onet = align.detect_face.create_mtcnn(sess, None)
-  
-    nrof_samples = len(image_paths)
-    img_list = [None] * nrof_samples
-    for i in xrange(nrof_samples):
-        img = misc.imread(os.path.expanduser(image_paths[i]))
-        if img.ndim == 2:
-            img = facenet.to_rgb(img)
-        img = img[:,:,0:3]
-        img_size = np.asarray(img.shape)[0:2]
-        bounding_boxes, _ = align.detect_face.detect_face(img, minsize, pnet, rnet, onet, threshold, factor)
-        det = np.squeeze(bounding_boxes[0,0:4])
-        bb = np.zeros(4, dtype=np.int32)
-        bb[0] = np.maximum(det[0]-margin/2, 0)
-        bb[1] = np.maximum(det[1]-margin/2, 0)
-        bb[2] = np.minimum(det[2]+margin/2, img_size[1])
-        bb[3] = np.minimum(det[3]+margin/2, img_size[0])
-        cropped = img[bb[1]:bb[3],bb[0]:bb[2],:]
-        aligned = misc.imresize(cropped, (image_size, image_size), interp='bilinear')
-        prewhitened = facenet.prewhiten(aligned)
-        img_list[i] = prewhitened
-    images = np.stack(img_list)
-    return images
-
 class FaceNetPredictor:
     def createLogsDirIfNecessary(self, base_dir):
         subdir = datetime.strftime(datetime.now(), '%Y%m%d-%H%M%S')
@@ -60,6 +26,42 @@ class FaceNetPredictor:
         src_path,_ = os.path.split(os.path.realpath(__file__))
         facenet.store_revision_info(src_path, log_dir, ' '.join(sys.argv))
 
+    def load_and_align_inception_data(self, data_dir, image_size, margin = 0, gpu_memory_fraction=1.0):
+        image_paths = glob.glob(data_dir + '/*')
+
+        minsize = 20 # minimum size of face
+        threshold = [ 0.6, 0.7, 0.7 ]  # three steps's threshold
+        factor = 0.709 # scale factor
+        
+        print('Creating networks and loading parameters')
+        with tf.Graph().as_default():
+            gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=gpu_memory_fraction)
+            sess = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options, log_device_placement=False))
+            with sess.as_default():
+                pnet, rnet, onet = align.detect_face.create_mtcnn(sess, None)
+      
+        nrof_samples = len(image_paths)
+        img_list = [None] * nrof_samples
+        for i in xrange(nrof_samples):
+            img = misc.imread(os.path.expanduser(image_paths[i]))
+            if img.ndim == 2:
+                img = facenet.to_rgb(img)
+            img = img[:,:,0:3]
+            img_size = np.asarray(img.shape)[0:2]
+            bounding_boxes, _ = align.detect_face.detect_face(img, minsize, pnet, rnet, onet, threshold, factor)
+            det = np.squeeze(bounding_boxes[0,0:4])
+            bb = np.zeros(4, dtype=np.int32)
+            bb[0] = np.maximum(det[0]-margin/2, 0)
+            bb[1] = np.maximum(det[1]-margin/2, 0)
+            bb[2] = np.minimum(det[2]+margin/2, img_size[1])
+            bb[3] = np.minimum(det[3]+margin/2, img_size[0])
+            cropped = img[bb[1]:bb[3],bb[0]:bb[2],:]
+            aligned = misc.imresize(cropped, (image_size, image_size), interp='bilinear')
+            prewhitened = facenet.prewhiten(aligned)
+            img_list[i] = prewhitened
+        images = np.stack(img_list)
+        return images
+
     def load_training_data_and_labels(self, samples_dir, image_size):
         train_set = facenet.get_dataset(samples_dir)
         train_image_path_list, train_label_list = facenet.get_image_paths_and_labels(train_set)
@@ -68,10 +70,15 @@ class FaceNetPredictor:
 
         return train_image_list, train_label_list, train_set
 
-    def knn(self, embeddings, samples_embedding_list, samples_labels_oneHot, session, k):
+    def knn(self, embeddings, samples_embedding_list, samples_labels, session, k):
+        num_labels = np.max(samples_labels)+1
+
         embeddings_placeholder = tf.placeholder(tf.float32, shape=[None, 128])
         train_embeddings_placeholder = tf.placeholder(tf.float32, shape=[None, 128])
-        train_labels_placeholder = tf.placeholder(tf.int32, shape=[None,samples_labels_oneHot.shape[1]])
+        num_labels_placeholder = tf.placeholder(tf.int32)
+        train_labels_placeholder = tf.placeholder(tf.int32, shape=[len(samples_labels)])
+
+        train_labels_one_hot = tf.one_hot(train_labels_placeholder, num_labels_placeholder)
 
         # L1
         #distance = tf.reduce_sum(tf.abs(tf.subtract(train_embeddings_placeholder, tf.expand_dims(embeddings_placeholder,1))), axis=2)
@@ -81,22 +88,38 @@ class FaceNetPredictor:
         
         # Predict: Get min distance index (Nearest neighbor)
         top_k_samples_distances, top_k_samples_indices = tf.nn.top_k(tf.negative(distance), k=k)
-        prediction_indices = tf.gather(train_labels_placeholder, top_k_samples_indices)
+        prediction_indices = tf.gather(train_labels_one_hot, top_k_samples_indices)
 
         # Predict the mode category
         count_of_predictions = tf.reduce_sum(prediction_indices, axis=1)
-        prediction_op = tf.argmax(count_of_predictions, axis=1)
+        prediction_op = tf.argmax(count_of_predictions, axis=1, name='predictions')
 
-        feed_dict = {embeddings_placeholder:embeddings, train_embeddings_placeholder: samples_embedding_list, train_labels_placeholder: samples_labels_oneHot}
+        #init_op = tf.initialize_variables([embeddings_placeholder, train_embeddings_placeholder, num_labels_placeholder, train_labels_placeholder])
+        #session.run(init_op)
+
+        feed_dict = {embeddings_placeholder:embeddings, train_embeddings_placeholder: samples_embedding_list, train_labels_placeholder: samples_labels, num_labels_placeholder: num_labels}
         predictions = session.run(prediction_op, feed_dict=feed_dict)
 
         return predictions
 
+    def load_facenet_model(self, model_dir, meta_file, ckpt_file):
+        model_dir_exp = os.path.expanduser(model_dir)
+        saver = tf.train.import_meta_graph(os.path.join(model_dir_exp, meta_file))
+        tf.get_default_session().run(tf.global_variables_initializer())
+        tf.get_default_session().run(tf.local_variables_initializer())
+        saver.restore(tf.get_default_session(), os.path.join(model_dir_exp, ckpt_file))
+
+    def store_model(self, session, model_store_dir):
+        model_dir = os.path.expanduser(model_store_dir)
+        if not os.path.isdir(model_dir):  # Create the model directory if it doesn't exist
+            os.makedirs(model_dir)
+        saver = tf.train.Saver()
+        saver.save(session, model_dir + "/knn_classifier_model.ckpt")
+        tf.train.write_graph(session.graph_def, '', model_dir + '/knn_classifier_model_graph.pb')
+
 def main(args):
     # get file list    
     fp = FaceNetPredictor()
-    files = glob.glob(args.data_dir + '/*')
-    images = load_and_align_data(files, args.image_size)
     model_dir = args.model_dir
 
     # load graph into session from checkpoint
@@ -111,38 +134,30 @@ def main(args):
                 
             print('Metagraph file: %s' % meta_file)
             print('Checkpoint file: %s' % ckpt_file)
-            facenet.load_model(model_dir, meta_file, ckpt_file)
+            fp.load_facenet_model(model_dir, meta_file, ckpt_file)
 
             images_placeholder = tf.get_default_graph().get_tensor_by_name("input:0")
             embeddings_placeholder = tf.get_default_graph().get_tensor_by_name("embeddings:0")
             phase_train_placeholder = tf.get_default_graph().get_tensor_by_name("phase_train:0")
 
-            feed_dict = {images_placeholder:images, phase_train_placeholder:False}
-            embeddings = sess.run(embeddings_placeholder,feed_dict=feed_dict)
-
+            # calculate embedding for training images
             train_images_list, train_labels_list, data_set = fp.load_training_data_and_labels(args.samples_dir, args.image_size)
-            feed_dict = {images_placeholder:train_images_list, phase_train_placeholder:False}
-            train_embeddings = sess.run(embeddings_placeholder,feed_dict=feed_dict)
+            feed_dict = {images_placeholder: train_images_list, phase_train_placeholder: False}
+            train_embeddings = sess.run(embeddings_placeholder, feed_dict=feed_dict)
 
-            num_labels = np.max(train_labels_list)+1
+            # calculate embedding for inception images
+            inception_images = fp.load_and_align_inception_data(args.data_dir, args.image_size)
+            feed_dict = {images_placeholder: inception_images, phase_train_placeholder: False}
+            embeddings = sess.run(embeddings_placeholder, feed_dict=feed_dict)
 
-            num_labels_placeholder = tf.placeholder(tf.int32)
-            train_labels_placeholder = tf.placeholder(tf.int32, shape=[len(train_labels_list)])
-            one_hot_op = tf.one_hot(train_labels_placeholder, num_labels_placeholder)
-
-            feed_dict = {num_labels_placeholder: num_labels, train_labels_placeholder: train_labels_list}
-            train_labels_list_one_hot = sess.run(one_hot_op, feed_dict=feed_dict)
-
-            predictions = fp.knn(embeddings, train_embeddings, train_labels_list_one_hot, sess, args.k)
+            predicted_classes = fp.knn(embeddings, train_embeddings, train_labels_list, sess, args.k)
+            predicted_class_labels = map(lambda imageClass: imageClass.name, np.take(data_set, predicted_classes))
             print("Predictions")
-            print(predictions)
+            print(predicted_classes)
+            print(predicted_class_labels)
 
-            predicted_labels = []
-            for prediction in predictions:
-                class_name = data_set[prediction].name
-                predicted_labels.append(class_name)
-            print(predicted_labels)
-
+            if args.model_store_dir != None:
+                fp.store_model(sess, args.model_store_dir)
 
 
 def parse_arguments(argv):
@@ -152,6 +167,8 @@ def parse_arguments(argv):
         help='Directory where to write event logs.', default='~/logs/facenet')
     parser.add_argument('--model_dir', type=str, required=True,
         help='Directory where to load the model from.')
+    parser.add_argument('--model_store_dir', type=str, required=False,
+        help='Directory where to store the model subdirectory.', default=None)
     parser.add_argument('--data_dir', type=str, required=True,
         help='Path to the data directory containing images for which to create predictions.')
     parser.add_argument('--image_size', type=int,
