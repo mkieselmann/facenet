@@ -105,12 +105,18 @@ class FaceNetPredictor:
         distance = tf.sqrt(tf.reduce_sum(tf.square(tf.subtract(train_embeddings_placeholder, tf.expand_dims(embeddings_placeholder,1))), axis=2))
         
         # Predict: Get min distance index (Nearest neighbor)
-        top_k_samples_distances, top_k_samples_indices = tf.nn.top_k(tf.negative(distance), k=k)
+        top_k_samples_negative_distances, top_k_samples_indices = tf.nn.top_k(tf.negative(distance), k=k)
         prediction_indices = tf.gather(train_labels_one_hot, top_k_samples_indices)
+        top_k_samples_distances = tf.negative(top_k_samples_negative_distances)
+
+
+        distance_weights = tf.expand_dims(tf.div(tf.ones([1], tf.float32), top_k_samples_distances), 1)
+        weighted_count_of_predictions = tf.squeeze(tf.matmul(distance_weights, prediction_indices), axis=[1])
+        prediction_op = tf.argmax(weighted_count_of_predictions, axis=1, name='knn_predictions')
 
         # Predict the mode category
-        count_of_predictions = tf.reduce_sum(prediction_indices, axis=1)
-        prediction_op = tf.argmax(count_of_predictions, axis=1, name='knn_predictions')
+        #count_of_predictions = tf.reduce_sum(prediction_indices, axis=1)
+        #prediction_op = tf.argmax(count_of_predictions, axis=1, name='knn_predictions')
 
         return prediction_op
 
