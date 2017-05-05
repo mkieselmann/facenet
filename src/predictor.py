@@ -219,7 +219,7 @@ def parse_arguments(argv):
     parser.add_argument('--samples_dir', type=str, required=True,
         help='Path to the directory containing folders for each class with training images.')
     parser.add_argument('--k', type=int, required=False,
-        help='The parameter k for determining the k-nearest neighbors. Rule-of-thumb: should not be larger than the number of samples in each class.', default=2)
+        help='The parameter k for determining the k-nearest neighbors. Rule-of-thumb: should not be larger than the number of samples in each class.', default=3)
 
     return parser.parse_args(argv)
   
