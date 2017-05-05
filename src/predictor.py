@@ -26,7 +26,7 @@ class FaceNetPredictor:
         src_path,_ = os.path.split(os.path.realpath(__file__))
         facenet.store_revision_info(src_path, log_dir, ' '.join(sys.argv))
 
-    def load_and_align_inception_data(self, data_dir, image_size, margin = 0, gpu_memory_fraction=1.0):
+    def load_and_align_inception_data(self, data_dir, session, image_size, margin = 0, gpu_memory_fraction=1.0):
         image_paths = glob.glob(data_dir + '/*')
 
         minsize = 20 # minimum size of face
@@ -39,13 +39,13 @@ class FaceNetPredictor:
             sess = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options, log_device_placement=False))
             with sess.as_default():
                 pnet, rnet, onet = align.detect_face.create_mtcnn(sess, None)
-      
+
         nrof_samples = len(image_paths)
         img_list = [None] * nrof_samples
         for i in xrange(nrof_samples):
-            img = misc.imread(os.path.expanduser(image_paths[i]))
-            if img.ndim == 2:
-                img = facenet.to_rgb(img)
+            feed_dict = {"preprocess/image_path:0": os.path.expanduser(image_paths[i])}
+            img = session.run("preprocess/image_array:0", feed_dict=feed_dict)
+
             img = img[:,:,0:3]
             img_size = np.asarray(img.shape)[0:2]
             bounding_boxes, _ = align.detect_face.detect_face(img, minsize, pnet, rnet, onet, threshold, factor)
@@ -56,19 +56,40 @@ class FaceNetPredictor:
             bb[2] = np.minimum(det[2]+margin/2, img_size[1])
             bb[3] = np.minimum(det[3]+margin/2, img_size[0])
             cropped = img[bb[1]:bb[3],bb[0]:bb[2],:]
-            aligned = misc.imresize(cropped, (image_size, image_size), interp='bilinear')
-            prewhitened = facenet.prewhiten(aligned)
-            img_list[i] = prewhitened
+            #aligned = misc.imresize(cropped, (image_size, image_size), interp='bilinear')
+            #prewhitened = facenet.prewhiten(aligned)
+            feed_dict = {"preprocess/image_array:0": cropped}
+            processed_image = session.run("preprocess/pre_process_image:0", feed_dict=feed_dict)
+            img_list[i] = processed_image
         images = np.stack(img_list)
         return images
 
-    def load_training_data_and_labels(self, samples_dir, image_size):
+    def setup_load_and_pre_process_image_op(self, image_size):
+        image_path_placeholder = tf.placeholder(tf.string, name='preprocess/image_path')
+        image_contents_placeholder = tf.read_file(image_path_placeholder, name='preprocess/image_contents')   
+        image = tf.image.decode_image(image_contents_placeholder)
+        image = tf.identity(image, name="preprocess/image_array")
+        image = tf.image.resize_image_with_crop_or_pad(image, image_size, image_size)
+        image.set_shape((image_size, image_size, 3))
+        image = tf.image.per_image_standardization(image)
+        return tf.identity(image, name="preprocess/pre_process_image")
+
+    def load_training_data(self, train_image_path_list, sess):
+        train_image_list = []
+        for path in train_image_path_list:
+            feed_dict = {"preprocess/image_path:0": os.path.expanduser(path)}
+            processed_image = sess.run("preprocess/pre_process_image:0", feed_dict=feed_dict)
+            train_image_list.append(processed_image)
+
+        #train_image_list = facenet.load_data(train_image_path_list, False, False, image_size, True)
+        return train_image_list
+
+    def get_image_paths_and_labels(self, samples_dir):
         train_set = facenet.get_dataset(samples_dir)
-        train_image_path_list, train_label_list = facenet.get_image_paths_and_labels(train_set)
+        train_image_path_list, train_labels_list = facenet.get_image_paths_and_labels(train_set)
+        labels_list = map(lambda imageClass: imageClass.name, train_set)
 
-        train_image_list = facenet.load_data(train_image_path_list, False, False, image_size, True)
-
-        return train_image_list, train_label_list, train_set
+        return train_image_path_list, train_labels_list, labels_list
 
     def setup_knn_prediction_op(self, samples_labels, session, k):
         num_labels = np.max(samples_labels)+1
@@ -132,10 +153,7 @@ def main(args):
             log_dir = fp.createLogsDirIfNecessary(args.logs_base_dir)
             fp.storeRevisionInfoIfNecessary(log_dir)
 
-            # load images
-            train_images_list, train_labels_list, data_set = fp.load_training_data_and_labels(args.samples_dir, args.image_size)
-            inception_images = fp.load_and_align_inception_data(args.data_dir, args.image_size)
-            num_labels = np.max(train_labels_list)+1
+            train_image_path_list, train_labels_list, labels_list = fp.get_image_paths_and_labels(args.samples_dir)
 
             if args.frozen_model_path != None:
                 print("Loading frozen model: %s" % args.frozen_model_path)
@@ -148,25 +166,29 @@ def main(args):
                 
                 print('Metagraph file: %s' % meta_file)
                 print('Checkpoint file: %s' % ckpt_file)
+                fp.setup_load_and_pre_process_image_op(args.image_size)
                 fp.load_facenet_model(model_dir, meta_file, ckpt_file)
                 fp.setup_knn_prediction_op(train_labels_list, sess, args.k)
+
+            train_images = fp.load_training_data(train_image_path_list, sess)
+            inception_images = fp.load_and_align_inception_data(args.data_dir, sess, args.image_size)
 
             print("Successfully loaded model")
 
             # calculate embedding for training images
-            feed_dict = {"input:0": train_images_list, "phase_train:0": False}
+            feed_dict = {"input:0": train_images, "phase_train:0": False}
             train_embeddings = sess.run("embeddings:0", feed_dict=feed_dict)
 
             # calculate embedding for inception images
             feed_dict = {"input:0": inception_images, "phase_train:0": False}
             embeddings = sess.run("embeddings:0", feed_dict=feed_dict)
 
-            feed_dict = {"knn_embeddings:0":embeddings, "knn_train_embeddings:0": train_embeddings, "knn_train_labels:0": train_labels_list, "knn_num_labels:0": num_labels}
+            feed_dict = {"knn_embeddings:0":embeddings, "knn_train_embeddings:0": train_embeddings, "knn_train_labels:0": train_labels_list, "knn_num_labels:0": len(labels_list)}
             predicted_classes = sess.run("knn_predictions:0", feed_dict=feed_dict)
-
-            predicted_class_labels = map(lambda imageClass: imageClass.name, np.take(data_set, predicted_classes))
             print("Predictions")
             print(predicted_classes)
+
+            predicted_class_labels = np.take(labels_list, predicted_classes)
             print(predicted_class_labels)
 
             if args.model_store_dir != None:

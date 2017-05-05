@@ -66,10 +66,10 @@ def main(args):
                     if 'use_locking' in node.attr: del node.attr['use_locking']
             
             # Get the list of important nodes
-            output_node_names = 'embeddings,knn_predictions'
+            output_node_names = 'embeddings,knn_predictions,preprocess/image_array,preprocess/pre_process_image'
             whitelist_names = []
             for node in gd.node:
-                if node.name.startswith('InceptionResnetV1') or node.name.startswith('embeddings') or node.name.startswith('phase_train') or node.name.startswith('Bottleneck') or node.name.startswith('knn_') or node.name.startswith('input'):
+                if node.name.startswith('InceptionResnetV1') or node.name.startswith('embeddings') or node.name.startswith('phase_train') or node.name.startswith('Bottleneck') or node.name.startswith('knn_') or node.name.startswith('input') or node.name.startswith('preprocess/'):
                     print(node.name)
                     whitelist_names.append(node.name)
 
