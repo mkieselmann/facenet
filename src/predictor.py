@@ -97,7 +97,7 @@ class FaceNetPredictor:
         embeddings_placeholder = tf.placeholder(tf.float32, shape=[None, 128], name='knn_embeddings')
         train_embeddings_placeholder = tf.placeholder(tf.float32, shape=[None, 128], name='knn_train_embeddings')
         num_labels_placeholder = tf.placeholder(tf.int32, name='knn_num_labels')
-        train_labels_placeholder = tf.placeholder(tf.int32, shape=[len(samples_labels)], name='knn_train_labels')
+        train_labels_placeholder = tf.placeholder(tf.int32, shape=[None], name='knn_train_labels')#len(samples_labels)
 
         train_labels_one_hot = tf.one_hot(train_labels_placeholder, num_labels_placeholder)
 
@@ -109,7 +109,6 @@ class FaceNetPredictor:
         prediction_indices = tf.gather(train_labels_one_hot, top_k_samples_indices)
         top_k_samples_distances = tf.negative(top_k_samples_negative_distances)
 
-
         distance_weights = tf.expand_dims(tf.div(tf.ones([1], tf.float32), top_k_samples_distances), 1)
         weighted_count_of_predictions = tf.squeeze(tf.matmul(distance_weights, prediction_indices), axis=[1])
         prediction_op = tf.argmax(weighted_count_of_predictions, axis=1, name='knn_predictions')
@@ -118,7 +117,15 @@ class FaceNetPredictor:
         #count_of_predictions = tf.reduce_sum(prediction_indices, axis=1)
         #prediction_op = tf.argmax(count_of_predictions, axis=1, name='knn_predictions')
 
-        return prediction_op
+        # get distance for prediction
+        # predictions [40,40,40,40] -> [[40,40,40],[40,40,40],[40,40,40],[40,40,40]]: #predictions x k
+        top_k_labels = tf.gather(train_labels_placeholder, top_k_samples_indices)
+        predictions_repeated = tf.matmul(tf.cast(tf.expand_dims(prediction_op, 1), tf.float32), tf.ones([1,k]))
+        distances_for_predicted_classes = tf.where(tf.equal(tf.cast(top_k_labels, tf.float32), predictions_repeated), top_k_samples_distances, tf.add(top_k_samples_distances, 1000.0))
+        min_distances_indices = tf.argmin(distances_for_predicted_classes, axis=1)
+        min_distances = tf.gather(distances_for_predicted_classes, min_distances_indices, name='knn_min_distances')
+
+        return prediction_op, min_distances
 
     def load_facenet_model(self, model_dir, meta_file, ckpt_file):
         model_dir_exp = os.path.expanduser(model_dir)
@@ -175,31 +182,37 @@ def main(args):
                 fp.setup_load_and_pre_process_image_op(args.image_size)
                 fp.load_facenet_model(model_dir, meta_file, ckpt_file)
                 fp.setup_knn_prediction_op(train_labels_list, sess, args.k)
+            print("Successfully loaded model")
 
             train_images = fp.load_training_data(train_image_path_list, sess)
+            print("Successfully loaded training images")
             inception_images = fp.load_and_align_inception_data(args.data_dir, sess, args.image_size)
-
-            print("Successfully loaded model")
+            print("Successfully loaded inception images")
 
             # calculate embedding for training images
             feed_dict = {"input:0": train_images, "phase_train:0": False}
             train_embeddings = sess.run("embeddings:0", feed_dict=feed_dict)
+            print("Calculated training images embeddings")
 
             # calculate embedding for inception images
             feed_dict = {"input:0": inception_images, "phase_train:0": False}
             embeddings = sess.run("embeddings:0", feed_dict=feed_dict)
+            print("Calculated inception images embeddings")
 
             feed_dict = {"knn_embeddings:0":embeddings, "knn_train_embeddings:0": train_embeddings, "knn_train_labels:0": train_labels_list, "knn_num_labels:0": len(labels_list)}
-            predicted_classes = sess.run("knn_predictions:0", feed_dict=feed_dict)
+            predicted_classes, distances = sess.run(["knn_predictions:0",'knn_min_distances:0'], feed_dict=feed_dict)
+
             print("Predictions")
             print(predicted_classes)
 
             predicted_class_labels = np.take(labels_list, predicted_classes)
             print(predicted_class_labels)
 
+            print("Distances")
+            print(distances)
+
             if args.model_store_dir != None:
                 fp.store_model(sess, args.model_store_dir)
-
 
 def parse_arguments(argv):
     parser = argparse.ArgumentParser()
