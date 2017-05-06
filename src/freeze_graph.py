@@ -52,7 +52,7 @@ def main(args):
             
             # Retrieve the protobuf graph definition and fix the batch norm nodes
             gd = sess.graph.as_graph_def()
-            for node in gd.node:            
+            for node in gd.node:      
                 if node.op == 'RefSwitch':
                     node.op = 'Switch'
                     for index in xrange(len(node.input)):
@@ -64,13 +64,15 @@ def main(args):
                 elif node.op == 'AssignAdd':
                     node.op = 'Add'
                     if 'use_locking' in node.attr: del node.attr['use_locking']
+                elif node.op == 'BatchMatMul':
+                    node.op = 'MatMul'
+                    if 'use_locking' in node.attr: del node.attr['use_locking']
             
             # Get the list of important nodes
-            output_node_names = 'embeddings,knn_predictions,preprocess/image_array,preprocess/pre_process_image'
+            output_node_names = 'embeddings,knn_predictions,knn_min_distances,preprocess/image_array,preprocess/pre_process_image'
             whitelist_names = []
             for node in gd.node:
-                if node.name.startswith('InceptionResnetV1') or node.name.startswith('embeddings') or node.name.startswith('phase_train') or node.name.startswith('Bottleneck') or node.name.startswith('knn_') or node.name.startswith('input') or node.name.startswith('preprocess/'):
-                    print(node.name)
+                if node.name.startswith('InceptionResnetV1') or node.name.startswith('embeddings') or node.name.startswith('phase_train') or node.name.startswith('Bottleneck') or node.name.startswith('knn_') or node.name.startswith('input') or node.name.startswith('preprocess'):
                     whitelist_names.append(node.name)
 
             # Replace all the variables in the graph with constants of the same values
