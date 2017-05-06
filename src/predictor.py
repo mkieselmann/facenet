@@ -150,8 +150,8 @@ class FaceNetPredictor:
         metagraph_filename = os.path.join(model_dir, 'model-%s.meta' % datetime_str)
         if not os.path.isdir(model_dir):  # Create the model directory if it doesn't exist
             os.makedirs(model_dir)
-        saver = tf.train.Saver()
-        saver.save(session, checkpoint_path, write_meta_graph=False,global_step=1)
+        saver = tf.train.Saver(tf.trainable_variables(), max_to_keep=3)
+        saver.save(session, checkpoint_path, write_meta_graph=False, global_step=1)
         saver.export_meta_graph(metagraph_filename)
 
 def main(args):
