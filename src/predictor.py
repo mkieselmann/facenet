@@ -122,8 +122,7 @@ class FaceNetPredictor:
         top_k_labels = tf.gather(train_labels_placeholder, top_k_samples_indices)
         predictions_repeated = tf.matmul(tf.cast(tf.expand_dims(prediction_op, 1), tf.float32), tf.ones([1,k]))
         distances_for_predicted_classes = tf.where(tf.equal(tf.cast(top_k_labels, tf.float32), predictions_repeated), top_k_samples_distances, tf.add(top_k_samples_distances, 1000.0))
-        min_distances_indices = tf.argmin(distances_for_predicted_classes, axis=1)
-        min_distances = tf.gather(distances_for_predicted_classes, min_distances_indices, name='knn_min_distances')
+        min_distances = tf.reduce_min(distances_for_predicted_classes, axis=1, name='knn_min_distances')
 
         return prediction_op, min_distances
 
