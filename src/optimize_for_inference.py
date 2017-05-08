@@ -110,7 +110,7 @@ def parse_args():
   parser.add_argument(
       "--placeholder_type_enum",
       type=str,
-      default=dtypes.float32.as_datatype_enum,
+      default=str(dtypes.float32.as_datatype_enum),
       help="The AttrValue enum to use for placeholders.")
   return parser.parse_known_args()
 
